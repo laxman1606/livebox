@@ -1,24 +1,25 @@
 import os
 import logging
+import asyncio
+import urllib.parse
 from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import urllib.parse
 
 # --- ⚙️ CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://your-app.onrender.com").rstrip("/")
-WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://your-blog.blogspot.com").rstrip("/")
+WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://your-website.net").rstrip("/")
 PORT = int(os.environ.get("PORT", 8080))
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- BOT SETUP ---
-# Bot ko yahan initialize karenge, start baad mein karenge
+# --- BOT INIT ---
+# in_memory=True rakhna zaruri hai Render ke liye
 bot = Client(
     "DiskWala_Render",
     api_id=API_ID,
@@ -31,8 +32,8 @@ bot = Client(
 routes = web.RouteTableDef()
 
 @routes.get("/")
-async def root_route(request):
-    return web.Response(text="✅ Bot is Online and Running!")
+async def root_handler(request):
+    return web.Response(text="✅ Bot & Server are Online!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -53,7 +54,7 @@ async def stream_handler(request):
         mime_type = getattr(media, "mime_type", "video/mp4")
         file_size = getattr(media, "file_size", 0)
 
-        # Range Request Logic (Seek Support)
+        # Range Request Logic (Seeking Support)
         range_header = request.headers.get('Range')
         start = 0
         
@@ -73,7 +74,7 @@ async def stream_handler(request):
             headers['Content-Length'] = str(file_size)
             status_code = 200
 
-        # Streaming Generator
+        # Data Generator
         async def file_generator():
             try:
                 async for chunk in bot.stream_media(message, offset=start):
@@ -87,48 +88,59 @@ async def stream_handler(request):
         logger.error(f"Stream Error: {e}")
         return web.Response(status=500, text="Server Error")
 
-# --- BOT COMMANDS ---
+# --- BOT HANDLERS ---
 @bot.on_message(filters.command("start"))
 async def start_msg(client, message):
-    await message.reply_text("👋 **Bot is Alive!**\nSend me a video.")
+    await message.reply_text("👋 **Bot is Active!**\nSend a video to get the stream link.")
 
 @bot.on_message(filters.private & (filters.video | filters.document | filters.audio))
-async def media_process(client, message):
+async def media_handler(client, message):
     try:
         media = message.video or message.document or message.audio
         fname = getattr(media, "file_name", "video.mp4")
         
         stream_link = f"{PUBLIC_URL}/stream/{message.chat.id}/{message.id}"
-        online_link = f"{WEB_APP_URL}/?src={stream_link}&name={urllib.parse.quote(fname)}"
+        web_link = f"{WEB_APP_URL}/?src={stream_link}&name={urllib.parse.quote(fname)}"
         
         await message.reply_text(
             f"✅ **Link Ready:**\n`{stream_link}`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶️ Watch Online", url=online_link)]
+                [InlineKeyboardButton("▶️ Play Online", url=web_link)]
             ])
         )
     except Exception as e:
         logger.error(e)
 
-# --- SERVER STARTUP & SHUTDOWN HOOKS ---
-async def on_startup(app):
-    logger.info("Starting Bot...")
+# --- MAIN EXECUTION (FIXED LOOP) ---
+async def main():
+    # 1. Start Bot First
+    logger.info("Starting Telegram Bot...")
     await bot.start()
-    logger.info("Bot Started!")
-
-async def on_cleanup(app):
-    logger.info("Stopping Bot...")
-    await bot.stop()
-
-# --- MAIN EXECUTION ---
-if __name__ == "__main__":
-    # Web App banayenge
+    
+    # 2. Start Web Server Manually (No create_app clash)
+    logger.info("Starting Web Server...")
     app = web.Application()
     app.add_routes(routes)
     
-    # Bot ko Web App ke startup process ke saath jod denge
-    app.on_startup.append(on_startup)
-    app.on_cleanup.append(on_cleanup)
+    runner = web.AppRunner(app)
+    await runner.setup()
     
-    # Server Run (Ye khud loop handle karega)
-    web.run_app(app, host="0.0.0.0", port=PORT)
+    # Render binds to 0.0.0.0 automatically
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    
+    logger.info(f"✅ Server Running on Port {PORT}")
+    
+    # 3. Keep Running Forever
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    # Explicitly creating a loop to avoid RuntimeError
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.error(f"Fatal Error: {e}")
