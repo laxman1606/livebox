@@ -1,10 +1,19 @@
 import os
-import asyncio
 import logging
+import asyncio
 import urllib.parse
+from aiohttp import web
+
+# --- 🛠️ LOOP FIX (ISKO SABSE UPAR RAKHNA ZARURI HAI) ---
+# Ye Pyrogram ko crash hone se bachayega
+try:
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiohttp import web
 
 # --- ⚙️ CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "0")) 
@@ -20,10 +29,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- BOT SETUP ---
+# Session file memory mein rakhenge taaki disk permission error na aaye
 if not os.path.exists("sessions"):
     os.makedirs("sessions")
 
-# Plugins=None aur No_Updates=False default hain, explicitly set karne ki zaroorat nahi
 app = Client(
     "sessions/DiskWala_Render",
     api_id=API_ID,
@@ -36,7 +45,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def status_check(request):
-    return web.Response(text="✅ DiskWala Bot is Online!")
+    return web.Response(text="✅ Bot & Server Online!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -47,7 +56,7 @@ async def stream_handler(request):
         try:
             message = await app.get_messages(chat_id, message_id)
         except Exception:
-            return web.Response(status=404, text="Message Not Found")
+            return web.Response(status=404, text="File Not Found (Check Channel)")
 
         media = message.video or message.document or message.audio
         if not media:
@@ -57,28 +66,33 @@ async def stream_handler(request):
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
         file_size = getattr(media, "file_size", 0)
 
-        headers = {
-            'Content-Type': mime_type,
-            'Content-Disposition': f'inline; filename="{file_name}"',
-            'Access-Control-Allow-Origin': '*',
-            'Content-Length': str(file_size)
-        }
-
+        # Streaming Logic
         async def file_generator():
-            async for chunk in app.stream_media(message):
-                yield chunk
+            try:
+                async for chunk in app.stream_media(message):
+                    yield chunk
+            except Exception as e:
+                logger.error(f"Stream interrupted: {e}")
 
-        return web.Response(body=file_generator(), headers=headers)
-
+        return web.Response(
+            body=file_generator(),
+            headers={
+                'Content-Type': mime_type,
+                'Content-Disposition': f'inline; filename="{file_name}"',
+                'Content-Length': str(file_size),
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
     except Exception as e:
-        logger.error(f"Stream Error: {e}")
-        return web.Response(status=500, text=str(e))
+        logger.error(f"Handler Error: {e}")
+        return web.Response(status=500, text="Server Error")
 
 # --- BOT COMMANDS ---
+
 @app.on_message(filters.command("start"))
 async def start(client, message):
     await message.reply_text(
-        f"👋 **Bot Online!**\nServer: {PUBLIC_URL}\nVideo bhejo, link milega."
+        f"👋 **Bot Started!**\n\nServer Link: `{PUBLIC_URL}`\nWaiting for files..."
     )
 
 @app.on_message(filters.private & (filters.video | filters.document | filters.audio))
@@ -90,44 +104,45 @@ async def media_handler(client, message):
         
         if not media: return
 
-        fname = getattr(media, "file_name", "file") or "file"
+        file_name = getattr(media, "file_name", "file") or "file"
+        
+        # Link Generation
         stream_link = f"{PUBLIC_URL}/stream/{chat_id}/{msg_id}"
-        safe_filename = urllib.parse.quote(fname)
-        web_app_link = f"{WEB_APP_URL}/?src={stream_link}&name={safe_filename}"
+        web_link = f"{WEB_APP_URL}/?src={stream_link}&name={urllib.parse.quote(file_name)}"
 
         await message.reply_text(
-            f"✅ **Link Generated:**\n`{stream_link}`",
+            f"✅ **Ready to Watch!**\n\n"
+            f"📂 `{file_name}`\n\n"
+            f"🔗 **Stream Link:**\n`{stream_link}`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶️ Play Online", url=web_app_link)]
+                [InlineKeyboardButton("▶️ Watch Online", url=web_link)]
             ])
         )
     except Exception as e:
         logger.error(e)
 
-# --- RUNNER (FIXED FOR RENDER) ---
+# --- RUNNER ---
 async def start_services():
-    # Web Server
+    # Web Server Start
     app_runner = web.AppRunner(web.Application(client_max_size=1024**3))
     app_runner.app.add_routes(routes)
     await app_runner.setup()
     site = web.TCPSite(app_runner, HOST, PORT)
     await site.start()
-    logger.info(f"✅ Web Server on Port {PORT}")
-    
-    # Telegram Bot
+    logger.info(f"✅ Web Server running on Port {PORT}")
+
+    # Bot Start
     await app.start()
     logger.info("✅ Telegram Bot Started")
     
-    # Keep Process Alive
+    # Keep alive
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    # YAHAN FIX KIYA HAI: Loop manually create kar rahe hain
+    # Jo loop humne upar banaya tha, usi ko use karenge
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         loop.run_until_complete(start_services())
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        logger.error(f"Fatal Error: {e}")
+        logger.error(f"Crash: {e}")
