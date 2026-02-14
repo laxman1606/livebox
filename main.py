@@ -2,34 +2,28 @@ import os
 import asyncio
 import logging
 import urllib.parse
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
 from pyrogram.file_id import FileId, FileType
 from pyrogram.raw.functions.upload import GetFile
 from pyrogram.raw.types import InputDocumentFileLocation, InputFileLocation
 
-# --- CONFIGURATION (Render Environment se lega) ---
+# --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-
-# Render Public Link (Bina last slash ke)
-# Example: https://myapp.onrender.com
-BOT_URL = os.environ.get("BOT_URL", "") 
-
-# Livebox WebApp Link
 WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://flyboxwala.blogspot.com")
-
+BOT_URL = os.environ.get("BOT_URL", "") 
 PORT = int(os.environ.get("PORT", 8080))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- BOT SETUP ---
-app = Client("RenderSeekBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50)
+# --- BOT CLIENT ---
+app = Client("RenderBotFixed", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50)
 
-# --- 🛠️ STREAMER CLASS (Seeking Support) ---
+# --- STREAMER CLASS ---
 class ByteStreamer:
     def __init__(self, client: Client, file_id: FileId):
         self.client = client
@@ -55,11 +49,7 @@ class ByteStreamer:
             to_read = min(limit, chunk_size)
             try:
                 result = await self.client.invoke(
-                    GetFile(
-                        location=self.location,
-                        offset=offset,
-                        limit=to_read
-                    )
+                    GetFile(location=self.location, offset=offset, limit=to_read)
                 )
                 if not result.bytes: break
                 yield result.bytes
@@ -75,7 +65,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def home(request):
-    return web.Response(text="✅ Render Streamer Running!")
+    return web.Response(text="✅ Render Bot is Live & Running!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -93,7 +83,7 @@ async def stream_handler(request):
         file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
 
-        # --- SEEKING FIX FOR RENDER ---
+        # Range Header Handling
         range_header = request.headers.get("Range")
         from_bytes, until_bytes = 0, file_size - 1
         
@@ -116,20 +106,15 @@ async def stream_handler(request):
             "Access-Control-Allow-Origin": "*",
         }
 
-        # Status 206 is MUST for seeking
         response = web.StreamResponse(status=206, headers=headers)
         await response.prepare(request)
 
-        # Streamer ko offset (jaha user ne skip kiya) se start karo
         streamer = ByteStreamer(app, file_id_obj)
-        
-        # 512KB Chunk size Render ke liye safe hai
         async for chunk in streamer.yield_chunk(from_bytes, 512*1024, content_length):
             try: await response.write(chunk)
             except: break
 
         return response
-
     except Exception as e:
         logger.error(e)
         return web.Response(status=500)
@@ -137,41 +122,45 @@ async def stream_handler(request):
 # --- BOT COMMANDS ---
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 **Render Bot Active!** Send video.")
+    await message.reply_text("👋 **Bot is Online!** Send me a video.")
 
 @app.on_message(filters.private & (filters.video | filters.document))
 async def handle_video(client, message):
     try:
         if not BOT_URL:
-            return await message.reply_text("❌ Error: `BOT_URL` Env Variable not set in Render!")
+            return await message.reply_text("❌ Error: BOT_URL Variable Missing!")
 
         media = message.video or message.document
         fname = getattr(media, "file_name", "Video.mp4") or "Video.mp4"
         
-        # Stream Link
         stream_link = f"{BOT_URL}/stream/{message.chat.id}/{message.id}"
-        
-        # Web App Link
         web_link = f"{WEB_APP_URL}/?src={urllib.parse.quote(stream_link)}&name={urllib.parse.quote(fname)}"
 
         await message.reply_text(
-            f"✅ **Link Ready!**\n📂 `{fname}`\n👇 **Click to Play:**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ WATCH VIDEO", url=web_link)]])
+            f"✅ **Link Ready!**\n📂 `{fname}`\n👇 **Watch Here:**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ PLAY VIDEO", url=web_link)]])
         )
     except Exception as e:
         logger.error(e)
 
-# --- RUNNER ---
-async def main():
+# --- 🚀 MAIN EXECUTION (FIXED FOR RENDER) ---
+async def start_bot():
+    # 1. Start Web Server
     server = web.Application()
     server.add_routes(routes)
     runner = web.AppRunner(server)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    
+    # 2. Start Pyrogram Client
     await app.start()
-    print("✅ Bot Started on Render!")
-    await asyncio.Event().wait()
+    print("✅ Bot and Server Started Successfully!")
+    
+    # 3. Keep Running
+    await idle()
+    await app.stop()
 
 if __name__ == "__main__":
+    # Ye naya tarika hai jo Python 3.10+ aur Render par crash nahi hota
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    loop.run_until_complete(start_bot())
