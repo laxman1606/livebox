@@ -13,33 +13,32 @@ from pyrogram.raw.types import InputDocumentFileLocation, InputFileLocation
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://tickwala.blogspot.com")
-BOT_URL = os.environ.get("BOT_URL", "") # Koyeb Link (No Slash)
-PORT = int(os.environ.get("PORT", 8000))
+WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://flyboxwala.blogspot.com")
+# Koyeb/Render ka Link (Bina '/' ke)
+BOT_URL = os.environ.get("BOT_URL", "") 
+PORT = int(os.environ.get("PORT", 8080))
 
-# Logging Setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- BOT CLIENT (FIXED: ipv6=False) ---
+# --- BOT SETUP (IPv6 False Zaruri hai Reply ke liye) ---
 app = Client(
-    "LiveboxBot",
+    "LiveboxPro",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workers=50,
-    ipv6=False # YEH SABSE ZARURI HAI (Reply Fix)
+    ipv6=False 
 )
 
-# --- STREAMER CLASS (Video Seek Fix) ---
+# --- 🛠️ STREAMER CLASS (Ye Video Play Karega) ---
 class ByteStreamer:
     def __init__(self, client: Client, file_id: FileId):
         self.client = client
         self.file_id = file_id
         
+        # Video aur Document ke liye alag location hoti hai
         if file_id.file_type in (FileType.VIDEO, FileType.DOCUMENT, FileType.AUDIO):
             self.location = InputDocumentFileLocation(
                 id=file_id.media_id,
@@ -56,6 +55,7 @@ class ByteStreamer:
             )
 
     async def yield_chunk(self, offset, chunk_size, limit):
+        # Ye loop Telegram se data maang kar browser ko deta hai
         while limit > 0:
             to_read = min(limit, chunk_size)
             try:
@@ -80,7 +80,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def home(request):
-    return web.Response(text="✅ Bot is Running Successfully!")
+    return web.Response(text="✅ Bot is Online and Streaming!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -98,7 +98,7 @@ async def stream_handler(request):
         file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
 
-        # Range Header Handling (Seek Support)
+        # --- RANGE REQUEST HANDLING (Browser Support) ---
         range_header = request.headers.get("Range")
         from_bytes, until_bytes = 0, file_size - 1
         
@@ -121,10 +121,12 @@ async def stream_handler(request):
             "Access-Control-Allow-Origin": "*",
         }
 
+        # Status 206 Partial Content (Zaruri hai play hone ke liye)
         response = web.StreamResponse(status=206, headers=headers)
         await response.prepare(request)
 
         streamer = ByteStreamer(app, file_id_obj)
+        # 1MB Chunk size for smooth streaming
         async for chunk in streamer.yield_chunk(from_bytes, 1024*1024, content_length):
             try: await response.write(chunk)
             except: break
@@ -134,19 +136,16 @@ async def stream_handler(request):
         logger.error(e)
         return web.Response(status=500)
 
-# --- BOT HANDLERS ---
+# --- BOT COMMANDS ---
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    logger.info(f"Command received from: {message.from_user.id}")
-    await message.reply_text("👋 **Bot is Online!**\nSend me a video file.")
+    await message.reply_text("👋 **Bot Active!** Video bhejo.")
 
 @app.on_message(filters.private & (filters.video | filters.document))
 async def handle_video(client, message):
     try:
-        logger.info("Video received!")
-        
         if not BOT_URL:
-            return await message.reply_text("❌ Error: `BOT_URL` Environment Variable is missing in Koyeb.")
+            return await message.reply_text("❌ Error: `BOT_URL` Env Variable missing!")
 
         media = message.video or message.document
         fname = getattr(media, "file_name", "Video.mp4") or "Video.mp4"
@@ -159,14 +158,11 @@ async def handle_video(client, message):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ PLAY VIDEO", url=web_link)]])
         )
     except Exception as e:
-        logger.error(f"Handler Error: {e}")
-        await message.reply_text("Error processing video.")
+        logger.error(e)
 
-# --- MAIN RUNNER (Force Start) ---
+# --- MAIN RUNNER ---
 async def start_services():
-    print("Initializing...")
-    
-    # 1. Start Web Server
+    # Web Server
     server = web.Application()
     server.add_routes(routes)
     runner = web.AppRunner(server)
@@ -174,16 +170,13 @@ async def start_services():
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     print(f"✅ Web Server Running on Port {PORT}")
 
-    # 2. Start Bot
+    # Bot Client
     await app.start()
-    print("✅ Bot Client Started!")
+    print("✅ Bot Started!")
     
-    # Force Clear Webhook (Important for Reply Fix)
-    try:
-        await app.delete_webhook()
-        print("✅ Webhook Cleared (Polling Mode Active)")
-    except:
-        pass
+    # Webhook Clear (Reply fix)
+    try: await app.delete_webhook()
+    except: pass
 
     await idle()
 
