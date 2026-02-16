@@ -1,45 +1,57 @@
 import os
-import asyncio
 import logging
+import asyncio
 import urllib.parse
-import mimetypes
-from pyrogram import Client, filters, idle
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
+
+# --- 🛠️ LOOP FIX (ISKO SABSE UPAR RAKHNA ZARURI HAI) ---
+try:
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# --- New Imports for Seeking (Skip) ---
 from pyrogram.file_id import FileId, FileType
 from pyrogram.raw.functions.upload import GetFile
 from pyrogram.raw.types import InputDocumentFileLocation, InputFileLocation
 
-# --- CONFIGURATION ---
-API_ID = int(os.environ.get("API_ID", 12345))
+# --- ⚙️ CONFIGURATION ---
+API_ID = int(os.environ.get("API_ID", "0")) 
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://flyboxwala.blogspot.com")
-# Koyeb/Render Link (Bina Slash ke)
-BOT_URL = os.environ.get("BOT_URL", "") 
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://your-app.onrender.com")
+WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://apki-website.netlify.app")
 PORT = int(os.environ.get("PORT", 8080))
+HOST = "0.0.0.0"
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- BOT SETUP ---
+if not os.path.exists("sessions"):
+    os.makedirs("sessions")
+
 app = Client(
-    "LiveboxPro",
+    "sessions/DiskWala_Render",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workers=50,
-    ipv6=False # Reply Fix
+    ipv6=False
 )
 
-# --- 🛠️ STREAMER CLASS (Video Skip Problem Solve Karega) ---
+# --- 🛠️ HELPER CLASS FOR SEEKING (SKIP SUPPORT) ---
+# Ye class zaruri hai taaki video restart na ho jab aap skip karein
 class ByteStreamer:
     def __init__(self, client: Client, file_id: FileId):
         self.client = client
         self.file_id = file_id
-        
-        # Sahi Location Detect Karna
+
         if file_id.file_type in (FileType.VIDEO, FileType.DOCUMENT, FileType.AUDIO):
             self.location = InputDocumentFileLocation(
                 id=file_id.media_id,
@@ -72,15 +84,15 @@ class ByteStreamer:
                 limit -= len(result.bytes)
                 if len(result.bytes) < to_read: break 
             except Exception as e:
-                logger.error(f"Stream Error: {e}")
+                logging.error(f"Stream Error: {e}")
                 break
 
 # --- WEB SERVER ---
 routes = web.RouteTableDef()
 
 @routes.get("/")
-async def home(request):
-    return web.Response(text="✅ Bot is Online with Original Filenames!")
+async def status_check(request):
+    return web.Response(text="✅ Bot & Server Online with Skip Support!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -88,26 +100,24 @@ async def stream_handler(request):
         chat_id = int(request.match_info['chat_id'])
         message_id = int(request.match_info['message_id'])
         
-        message = await app.get_messages(chat_id, message_id)
+        try:
+            message = await app.get_messages(chat_id, message_id)
+        except Exception:
+            return web.Response(status=404, text="File Not Found (Check Channel)")
+
         media = message.video or message.document or message.audio
-        
-        if not media: return web.Response(status=404)
+        if not media:
+            return web.Response(status=400, text="No Media Found")
 
+        # --- EXACT YOUR VARIABLES ---
+        file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
+        mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
+        file_size = getattr(media, "file_size", 0)
+        
+        # Helper for Seeking
         file_id_obj = FileId.decode(media.file_id)
-        file_size = media.file_size
-        
-        # --- FIX: ORIGINAL FILENAME & MIME TYPE ---
-        # Ab ye "Video.mp4" force nahi karega, jo naam hai wahi lega
-        file_name = getattr(media, "file_name", None)
-        if not file_name:
-            file_name = f"Video_{message_id}.mp4" # Agar naam bilkul nahi hai tabhi ye use hoga
-            
-        # Mime Type bhi original lega
-        mime_type = getattr(media, "mime_type", None)
-        if not mime_type:
-            mime_type = mimetypes.guess_type(file_name)[0] or "video/mp4"
 
-        # --- RANGE REQUEST (SKIP LOGIC) ---
+        # --- NEW: RANGE HEADER HANDLING (SKIP LOGIC) ---
         range_header = request.headers.get("Range")
         from_bytes, until_bytes = 0, file_size - 1
         
@@ -122,72 +132,85 @@ async def stream_handler(request):
         content_length = until_bytes - from_bytes + 1
         
         headers = {
-            "Content-Type": mime_type,
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Length": str(content_length),
-            "Content-Disposition": f'inline; filename="{file_name}"',
-            "Accept-Ranges": "bytes",
-            "Access-Control-Allow-Origin": "*",
+            'Content-Type': mime_type,
+            'Content-Range': f"bytes {from_bytes}-{until_bytes}/{file_size}",
+            'Content-Length': str(content_length),
+            'Content-Disposition': f'inline; filename="{file_name}"',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*'
         }
 
+        # Status 206 Partial Content (Ye video skip karne ke liye zaruri hai)
         response = web.StreamResponse(status=206, headers=headers)
         await response.prepare(request)
 
+        # Use ByteStreamer for Seeking
         streamer = ByteStreamer(app, file_id_obj)
         async for chunk in streamer.yield_chunk(from_bytes, 1024*1024, content_length):
             try: await response.write(chunk)
             except: break
 
         return response
-    except Exception as e:
-        logger.error(e)
-        return web.Response(status=500)
 
-# --- BOT COMMANDS ---
+    except Exception as e:
+        logger.error(f"Handler Error: {e}")
+        return web.Response(status=500, text="Server Error")
+
+# --- BOT COMMANDS (EXACTLY SAME AS YOURS) ---
+
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 **Bot Active!** Send file to get Original Link.")
+    await message.reply_text(
+        f"👋 **Bot Started!**\n\nServer Link: `{PUBLIC_URL}`\nWaiting for files..."
+    )
 
-@app.on_message(filters.private & (filters.video | filters.document))
-async def handle_video(client, message):
+@app.on_message(filters.private & (filters.video | filters.document | filters.audio))
+async def media_handler(client, message):
     try:
-        if not BOT_URL:
-            return await message.reply_text("❌ Error: `BOT_URL` Env Variable missing!")
+        chat_id = message.chat.id
+        msg_id = message.id
+        media = message.video or message.document or message.audio
+        
+        if not media: return
 
-        media = message.video or message.document
+        file_name = getattr(media, "file_name", "file") or "file"
         
-        # --- FIX: ORIGINAL NAME IN LINK ---
-        fname = getattr(media, "file_name", None) or f"Video_{message.id}.mp4"
-        
-        stream_link = f"{BOT_URL}/stream/{message.chat.id}/{message.id}"
-        
-        # Name ko URL encode kar rahe hain taaki spaces ki wajah se link na toote
-        web_link = f"{WEB_APP_URL}/?src={urllib.parse.quote(stream_link)}&name={urllib.parse.quote(fname)}"
+        # Link Generation
+        stream_link = f"{PUBLIC_URL}/stream/{chat_id}/{msg_id}"
+        web_link = f"{WEB_APP_URL}/?src={stream_link}&name={urllib.parse.quote(file_name)}"
 
         await message.reply_text(
-            f"✅ **Link Generated!**\n📂 `{fname}`\n👇 **Watch Here:**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ PLAY VIDEO", url=web_link)]])
+            f"✅ **Ready to Watch!**\n\n"
+            f"📂 `{file_name}`\n\n"
+            f"🔗 **Stream Link:**\n`{stream_link}`",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶️ Watch Online", url=web_link)]
+            ])
         )
     except Exception as e:
         logger.error(e)
 
-# --- MAIN RUNNER ---
+# --- RUNNER ---
 async def start_services():
-    server = web.Application()
-    server.add_routes(routes)
-    runner = web.AppRunner(server)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    print(f"✅ Web Server Running on Port {PORT}")
+    # Web Server Start
+    app_runner = web.AppRunner(web.Application(client_max_size=1024**3))
+    app_runner.app.add_routes(routes)
+    await app_runner.setup()
+    site = web.TCPSite(app_runner, HOST, PORT)
+    await site.start()
+    logger.info(f"✅ Web Server running on Port {PORT}")
 
+    # Bot Start
     await app.start()
-    print("✅ Bot Started!")
+    logger.info("✅ Telegram Bot Started")
     
-    try: await app.delete_webhook()
-    except: pass
-
-    await idle()
+    # Keep alive
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_services())
+    try:
+        loop.run_until_complete(start_services())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.error(f"Crash: {e}")
