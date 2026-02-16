@@ -14,7 +14,7 @@ API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://flyboxwala.blogspot.com")
-# Koyeb/Render ka Link (Bina '/' ke)
+# Koyeb/Render URL (Bina Slash ke)
 BOT_URL = os.environ.get("BOT_URL", "") 
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -22,23 +22,23 @@ PORT = int(os.environ.get("PORT", 8080))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- BOT SETUP (IPv6 False Zaruri hai Reply ke liye) ---
+# --- BOT SETUP ---
 app = Client(
     "LiveboxPro",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workers=50,
-    ipv6=False 
+    ipv6=False # Reply Fix ke liye zaruri
 )
 
-# --- 🛠️ STREAMER CLASS (Ye Video Play Karega) ---
+# --- 🛠️ FIX: STREAMER CLASS (Ye Video Skip Problem Solve Karega) ---
 class ByteStreamer:
     def __init__(self, client: Client, file_id: FileId):
         self.client = client
         self.file_id = file_id
         
-        # Video aur Document ke liye alag location hoti hai
+        # Video location detect karna
         if file_id.file_type in (FileType.VIDEO, FileType.DOCUMENT, FileType.AUDIO):
             self.location = InputDocumentFileLocation(
                 id=file_id.media_id,
@@ -55,7 +55,7 @@ class ByteStreamer:
             )
 
     async def yield_chunk(self, offset, chunk_size, limit):
-        # Ye loop Telegram se data maang kar browser ko deta hai
+        # Ye loop wahi se data uthayega jaha user ne skip kiya
         while limit > 0:
             to_read = min(limit, chunk_size)
             try:
@@ -80,7 +80,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def home(request):
-    return web.Response(text="✅ Bot is Online and Streaming!")
+    return web.Response(text="✅ Bot is Online with Seek Support!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -98,7 +98,7 @@ async def stream_handler(request):
         file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
 
-        # --- RANGE REQUEST HANDLING (Browser Support) ---
+        # --- FIX: RANGE REQUEST (Skip Logic) ---
         range_header = request.headers.get("Range")
         from_bytes, until_bytes = 0, file_size - 1
         
@@ -117,16 +117,16 @@ async def stream_handler(request):
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(content_length),
             "Content-Disposition": f'inline; filename="{file_name}"',
-            "Accept-Ranges": "bytes",
+            "Accept-Ranges": "bytes", # Browser ko batata hai ki seek allowed hai
             "Access-Control-Allow-Origin": "*",
         }
 
-        # Status 206 Partial Content (Zaruri hai play hone ke liye)
+        # Status 206 (Partial Content) is MUST for seeking
         response = web.StreamResponse(status=206, headers=headers)
         await response.prepare(request)
 
         streamer = ByteStreamer(app, file_id_obj)
-        # 1MB Chunk size for smooth streaming
+        # Offset (from_bytes) pass kar rahe hain taki video wahi se chale
         async for chunk in streamer.yield_chunk(from_bytes, 1024*1024, content_length):
             try: await response.write(chunk)
             except: break
@@ -139,7 +139,7 @@ async def stream_handler(request):
 # --- BOT COMMANDS ---
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 **Bot Active!** Video bhejo.")
+    await message.reply_text("👋 **Bot Active!** Video Skip is now fixed.")
 
 @app.on_message(filters.private & (filters.video | filters.document))
 async def handle_video(client, message):
@@ -174,7 +174,7 @@ async def start_services():
     await app.start()
     print("✅ Bot Started!")
     
-    # Webhook Clear (Reply fix)
+    # Webhook Clear
     try: await app.delete_webhook()
     except: pass
 
