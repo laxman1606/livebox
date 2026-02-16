@@ -4,7 +4,7 @@ import asyncio
 import urllib.parse
 from aiohttp import web
 
-# --- 🛠️ LOOP FIX (ISKO SABSE UPAR RAKHNA ZARURI HAI) ---
+# --- 🛠️ LOOP FIX ---
 try:
     loop = asyncio.get_running_loop()
 except RuntimeError:
@@ -14,7 +14,7 @@ except RuntimeError:
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- New Imports for Seeking (Skip) ---
+# --- Imports for Seeking (Fixed) ---
 from pyrogram.file_id import FileId, FileType
 from pyrogram.raw.functions.upload import GetFile
 from pyrogram.raw.types import InputDocumentFileLocation, InputFileLocation
@@ -45,13 +45,13 @@ app = Client(
     ipv6=False
 )
 
-# --- 🛠️ HELPER CLASS FOR SEEKING (SKIP SUPPORT) ---
-# Ye class zaruri hai taaki video restart na ho jab aap skip karein
+# --- 🛠️ FIXED STREAMER CLASS (Better Logic) ---
 class ByteStreamer:
     def __init__(self, client: Client, file_id: FileId):
         self.client = client
         self.file_id = file_id
 
+        # Video/Document Detection Logic
         if file_id.file_type in (FileType.VIDEO, FileType.DOCUMENT, FileType.AUDIO):
             self.location = InputDocumentFileLocation(
                 id=file_id.media_id,
@@ -68,6 +68,7 @@ class ByteStreamer:
             )
 
     async def yield_chunk(self, offset, chunk_size, limit):
+        # Ye loop chunk-by-chunk data bhejta hai
         while limit > 0:
             to_read = min(limit, chunk_size)
             try:
@@ -78,11 +79,15 @@ class ByteStreamer:
                         limit=to_read
                     )
                 )
-                if not result.bytes: break
+                if not result.bytes: break # End of file
+                
                 yield result.bytes
-                offset += len(result.bytes)
-                limit -= len(result.bytes)
-                if len(result.bytes) < to_read: break 
+                
+                read_len = len(result.bytes)
+                offset += read_len
+                limit -= read_len
+                
+                if read_len < to_read: break 
             except Exception as e:
                 logging.error(f"Stream Error: {e}")
                 break
@@ -92,7 +97,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def status_check(request):
-    return web.Response(text="✅ Bot & Server Online with Skip Support!")
+    return web.Response(text="✅ Bot Online with Fixed Streaming!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -102,22 +107,21 @@ async def stream_handler(request):
         
         try:
             message = await app.get_messages(chat_id, message_id)
-        except Exception:
-            return web.Response(status=404, text="File Not Found (Check Channel)")
+        except:
+            return web.Response(status=404, text="File Not Found")
 
         media = message.video or message.document or message.audio
         if not media:
-            return web.Response(status=400, text="No Media Found")
+            return web.Response(status=400, text="No Media")
 
-        # --- EXACT YOUR VARIABLES ---
+        # Variables
         file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
         file_size = getattr(media, "file_size", 0)
         
-        # Helper for Seeking
         file_id_obj = FileId.decode(media.file_id)
 
-        # --- NEW: RANGE HEADER HANDLING (SKIP LOGIC) ---
+        # --- CORRECT RANGE LOGIC ---
         range_header = request.headers.get("Range")
         from_bytes, until_bytes = 0, file_size - 1
         
@@ -129,6 +133,7 @@ async def stream_handler(request):
                     until_bytes = int(parts[1])
             except: pass
         
+        # Calculate content length based on range
         content_length = until_bytes - from_bytes + 1
         
         headers = {
@@ -140,12 +145,13 @@ async def stream_handler(request):
             'Access-Control-Allow-Origin': '*'
         }
 
-        # Status 206 Partial Content (Ye video skip karne ke liye zaruri hai)
+        # Status 206 Partial Content (Ye loading fix karega)
         response = web.StreamResponse(status=206, headers=headers)
         await response.prepare(request)
 
-        # Use ByteStreamer for Seeking
         streamer = ByteStreamer(app, file_id_obj)
+        
+        # 1MB Chunks (Standard for smoothness)
         async for chunk in streamer.yield_chunk(from_bytes, 1024*1024, content_length):
             try: await response.write(chunk)
             except: break
@@ -154,9 +160,9 @@ async def stream_handler(request):
 
     except Exception as e:
         logger.error(f"Handler Error: {e}")
-        return web.Response(status=500, text="Server Error")
+        return web.Response(status=500)
 
-# --- BOT COMMANDS (EXACTLY SAME AS YOURS) ---
+# --- BOT COMMANDS (NO CHANGES) ---
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -175,7 +181,6 @@ async def media_handler(client, message):
 
         file_name = getattr(media, "file_name", "file") or "file"
         
-        # Link Generation
         stream_link = f"{PUBLIC_URL}/stream/{chat_id}/{msg_id}"
         web_link = f"{WEB_APP_URL}/?src={stream_link}&name={urllib.parse.quote(file_name)}"
 
@@ -192,7 +197,6 @@ async def media_handler(client, message):
 
 # --- RUNNER ---
 async def start_services():
-    # Web Server Start
     app_runner = web.AppRunner(web.Application(client_max_size=1024**3))
     app_runner.app.add_routes(routes)
     await app_runner.setup()
@@ -200,11 +204,9 @@ async def start_services():
     await site.start()
     logger.info(f"✅ Web Server running on Port {PORT}")
 
-    # Bot Start
     await app.start()
     logger.info("✅ Telegram Bot Started")
     
-    # Keep alive
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
