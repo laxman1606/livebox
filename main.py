@@ -4,7 +4,8 @@ import asyncio
 import urllib.parse
 from aiohttp import web
 
-# --- 🛠️ LOOP FIX ---
+# --- 🛠️ LOOP FIX (ISKO SABSE UPAR RAKHNA ZARURI HAI) ---
+# Ye Pyrogram ko crash hone se bachayega
 try:
     loop = asyncio.get_running_loop()
 except RuntimeError:
@@ -13,11 +14,6 @@ except RuntimeError:
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-# --- Imports for Seeking (Fixed) ---
-from pyrogram.file_id import FileId, FileType
-from pyrogram.raw.functions.upload import GetFile
-from pyrogram.raw.types import InputDocumentFileLocation, InputFileLocation
 
 # --- ⚙️ CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "0")) 
@@ -33,6 +29,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- BOT SETUP ---
+# Session file memory mein rakhenge taaki disk permission error na aaye
 if not os.path.exists("sessions"):
     os.makedirs("sessions")
 
@@ -40,64 +37,15 @@ app = Client(
     "sessions/DiskWala_Render",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=50,
-    ipv6=False
+    bot_token=BOT_TOKEN
 )
-
-# --- 🛠️ FIXED STREAMER CLASS (Better Logic) ---
-class ByteStreamer:
-    def __init__(self, client: Client, file_id: FileId):
-        self.client = client
-        self.file_id = file_id
-
-        # Video/Document Detection Logic
-        if file_id.file_type in (FileType.VIDEO, FileType.DOCUMENT, FileType.AUDIO):
-            self.location = InputDocumentFileLocation(
-                id=file_id.media_id,
-                access_hash=file_id.access_hash,
-                file_reference=file_id.file_reference,
-                thumb_size=""
-            )
-        else:
-            self.location = InputFileLocation(
-                volume_id=file_id.volume_id,
-                local_id=file_id.local_id,
-                secret=file_id.secret,
-                file_reference=file_id.file_reference
-            )
-
-    async def yield_chunk(self, offset, chunk_size, limit):
-        # Ye loop chunk-by-chunk data bhejta hai
-        while limit > 0:
-            to_read = min(limit, chunk_size)
-            try:
-                result = await self.client.invoke(
-                    GetFile(
-                        location=self.location,
-                        offset=offset,
-                        limit=to_read
-                    )
-                )
-                if not result.bytes: break # End of file
-                
-                yield result.bytes
-                
-                read_len = len(result.bytes)
-                offset += read_len
-                limit -= read_len
-                
-                if read_len < to_read: break 
-            except Exception as e:
-                logging.error(f"Stream Error: {e}")
-                break
 
 # --- WEB SERVER ---
 routes = web.RouteTableDef()
 
 @routes.get("/")
 async def status_check(request):
-    return web.Response(text="✅ Bot Online with Fixed Streaming!")
+    return web.Response(text="✅ Bot & Server Online!")
 
 @routes.get("/stream/{chat_id}/{message_id}")
 async def stream_handler(request):
@@ -107,62 +55,39 @@ async def stream_handler(request):
         
         try:
             message = await app.get_messages(chat_id, message_id)
-        except:
-            return web.Response(status=404, text="File Not Found")
+        except Exception:
+            return web.Response(status=404, text="File Not Found (Check Channel)")
 
         media = message.video or message.document or message.audio
         if not media:
-            return web.Response(status=400, text="No Media")
+            return web.Response(status=400, text="No Media Found")
 
-        # Variables
         file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
         file_size = getattr(media, "file_size", 0)
-        
-        file_id_obj = FileId.decode(media.file_id)
 
-        # --- CORRECT RANGE LOGIC ---
-        range_header = request.headers.get("Range")
-        from_bytes, until_bytes = 0, file_size - 1
-        
-        if range_header:
+        # Streaming Logic
+        async def file_generator():
             try:
-                parts = range_header.replace("bytes=", "").split("-")
-                from_bytes = int(parts[0])
-                if len(parts) > 1 and parts[1]:
-                    until_bytes = int(parts[1])
-            except: pass
-        
-        # Calculate content length based on range
-        content_length = until_bytes - from_bytes + 1
-        
-        headers = {
-            'Content-Type': mime_type,
-            'Content-Range': f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            'Content-Length': str(content_length),
-            'Content-Disposition': f'inline; filename="{file_name}"',
-            'Accept-Ranges': 'bytes',
-            'Access-Control-Allow-Origin': '*'
-        }
+                async for chunk in app.stream_media(message):
+                    yield chunk
+            except Exception as e:
+                logger.error(f"Stream interrupted: {e}")
 
-        # Status 206 Partial Content (Ye loading fix karega)
-        response = web.StreamResponse(status=206, headers=headers)
-        await response.prepare(request)
-
-        streamer = ByteStreamer(app, file_id_obj)
-        
-        # 1MB Chunks (Standard for smoothness)
-        async for chunk in streamer.yield_chunk(from_bytes, 1024*1024, content_length):
-            try: await response.write(chunk)
-            except: break
-
-        return response
-
+        return web.Response(
+            body=file_generator(),
+            headers={
+                'Content-Type': mime_type,
+                'Content-Disposition': f'inline; filename="{file_name}"',
+                'Content-Length': str(file_size),
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
     except Exception as e:
         logger.error(f"Handler Error: {e}")
-        return web.Response(status=500)
+        return web.Response(status=500, text="Server Error")
 
-# --- BOT COMMANDS (NO CHANGES) ---
+# --- BOT COMMANDS ---
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -181,6 +106,7 @@ async def media_handler(client, message):
 
         file_name = getattr(media, "file_name", "file") or "file"
         
+        # Link Generation
         stream_link = f"{PUBLIC_URL}/stream/{chat_id}/{msg_id}"
         web_link = f"{WEB_APP_URL}/?src={stream_link}&name={urllib.parse.quote(file_name)}"
 
@@ -197,6 +123,7 @@ async def media_handler(client, message):
 
 # --- RUNNER ---
 async def start_services():
+    # Web Server Start
     app_runner = web.AppRunner(web.Application(client_max_size=1024**3))
     app_runner.app.add_routes(routes)
     await app_runner.setup()
@@ -204,12 +131,15 @@ async def start_services():
     await site.start()
     logger.info(f"✅ Web Server running on Port {PORT}")
 
+    # Bot Start
     await app.start()
     logger.info("✅ Telegram Bot Started")
     
+    # Keep alive
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
+    # Jo loop humne upar banaya tha, usi ko use karenge
     try:
         loop.run_until_complete(start_services())
     except KeyboardInterrupt:
